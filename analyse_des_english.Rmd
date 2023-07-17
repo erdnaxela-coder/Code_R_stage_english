@@ -1,5 +1,5 @@
 ---
-title: "Stage | Analyse descriptive des données et modèle de survie "
+title: "Stage | Ecriture de la base de données qui servira à faire les analyses de survie "
 author: "Catherineau Alexandre"
 date: "`r Sys.Date()`"
 output: html_document
