@@ -1,0 +1,315 @@
+---
+title: "Intervalle_conf"
+author: "Catherineau Alexandre"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Data and packages loading
+
+```{r}
+data=read.table("datatransvers.txt",header=T)
+library(dplyr)
+library(tidyr)
+library(survival)
+library(pbapply)
+library(ggplot2)
+```
+
+### Variable arrangement 
+
+#### Reduced centered age
+
+```{r}
+data$AGE0t=(data$AGE0-mean(data$AGE0))/sd(data$AGE0)
+```
+
+#### Stratification apoe4 x Centre
+
+```{r}
+data$Apoecentre[data$APOE4==0&data$CENTRE==1]=1
+data$Apoecentre[data$APOE4==0&data$CENTRE==2]=2
+data$Apoecentre[data$APOE4==0&data$CENTRE==3]=3
+data$Apoecentre[data$APOE4==1&data$CENTRE==1]=4
+data$Apoecentre[data$APOE4==1&data$CENTRE==2]=5
+data$Apoecentre[data$APOE4==1&data$CENTRE==3]=6
+```
+
+### Selection of persons
+
+```{r}
+selection <- function(n=1000){
+  echantillon=data[sample(1:nrow(data),n,replace=TRUE),]
+  return(echantillon)
+}
+d=selection()
+```
+
+### Calculation cumulative risk Mdem
+
+```{r}
+Rcumuldem <- function(M,score,sexe=1,dipniv=0,apoe4=0,age0=0,CENTRE=1){
+  data0=data.frame("SEXE"=sexe,"DIPNIVt"=dipniv,"AGE0t"=age0,"score14"=score,"Apoecentre"=CENTRE)
+  hazM=basehaz(M,newdata=data0)
+  return(hazM)
+}
+```
+
+### Calculation cumulative risk Mdc & Mdcdem
+
+```{r}
+Rcumul <- function(M,score,sexe=1,dipniv=0,apoe4=0,age0=0,CENTRE=1){
+  data0=data.frame("SEXE"=sexe,"DIPNIVt"=dipniv,"AGE0t"=age0,"score14"=score,"APOE4"=apoe4,"CENTRE"=CENTRE)
+  hazM=basehaz(M,newdata=data0)
+  return(hazM)
+}
+```
+
+### Probability of being healthy
+
+```{r}
+Fsain <- function(t,L){
+
+  hazdc <- L %>% arrange(abs(time-t)) %>% filter(row_number()==1) %>% pull(hazdc)
+  
+  hazdem<- L %>% arrange(abs(time-t)) %>% filter(row_number()==1) %>% pull(hazdem)
+  
+  proba_sain = exp(-hazdem-hazdc)
+  return(proba_sain)
+}
+```
+
+### Instantaneous risk
+
+```{r}
+Rinstant <- function(Mdem,Mdc,Mdcdem,score){
+  L=Rcumuldem(Mdem,score)%>% select(time,hazard)
+  Lambda0=L
+  
+  time=diff(L$time)
+  hazard=diff(L$hazard)
+  hazard <- c(hazard, tail(hazard, 1))
+  time <- c(time, tail(time, 1))
+  
+  Lambda0$hazard=hazard/time
+  
+  return(Lambda0)
+}
+```
+
+### Data frame with all times
+
+```{r}
+Ftable <- function(Mdem,Mdc,Mdcdem,df,a,abis){
+#calculation of hazdem
+Ldem2=Rcumuldem(Mdem,abis)
+Ldem2=Ldem2 %>% rename(hazdem=hazard) %>% select(time,hazdem)
+
+#calculation of hazdc
+Ldc2=Rcumul(Mdc,a)
+Ldc2=Ldc2 %>% rename(hazdc=hazard) %>% select(time,hazdc)
+
+#calculation of hazdemdc
+Ldcdem2=Rcumul(Mdcdem,a)
+Ldcdem2=Ldcdem2 %>% rename(hazdcdem=hazard) %>% select(time,hazdcdem)
+
+#base creation with all the times
+#tdem, tdc, tdemdc
+L = (Ldem2 %>% select(time)) %>% bind_rows(Ldc2 %>% select(time)) %>% bind_rows(Ldcdem2 %>% select(time)) %>% unique()
+
+#Filling of hazdem
+Ldem = Ldem2 %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(hazdem,.direction='downup') %>% unique()
+
+#Filling of hazdc
+Ldc = Ldc2 %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(hazdc,.direction='downup')
+
+#Filling of hazdemdc(a)
+Ldcdem = Ldcdem2 %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(hazdcdem,.direction='downup')
+
+#Instantaneous risk calculation alphadem
+Lalphadem=Rinstant(Mdem,Mdc,Mdcdem,abis) 
+Lalphadem=Lalphadem %>% rename(alphadem=hazard)
+
+#Filling of alphadem
+Lalphadem = Lalphadem %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(alphadem,.direction='downup')
+
+#Regrouping of hazdem, hazdc, hazdemdc and alphadem
+L = (((Ldem %>% inner_join(Ldc,by='time',relationship= "many-to-many")) %>% inner_join(Ldcdem,by='time',relationship= "many-to-many")) %>%  inner_join(Lalphadem,by='time',relationship= "many-to-many"))
+
+return(L)
+}
+```
+
+### Survival function
+
+```{r}
+Fsurvie <- function(Mdem,Mdc,Mdcdem,L,t=10,a=0,abis=0,sexe=1,dipniv=0,apoe4=0,age0=0){
+  i=1
+  calcul=0
+  #L=Ftable(Mdem,Mdc,Mdcdem,df,a,abis)
+  #We take the closest time
+  hazdcdem2 <- L %>% arrange(abs(time-t)) %>% filter(row_number()==1) %>% pull(hazdcdem)
+  
+  #Calculation
+  while(L$time[i]<t){
+    calcul = calcul+(exp(-L$hazdem[i]-L$hazdc[i])*L$alphadem[i]*exp(-hazdcdem2+L$hazdcdem[i]))*(min(t,L$time[i+1])-L$time[i])
+    i=i+1
+  }
+
+  proba_sain=Fsain(t,L)
+  #return(calcul)
+  return(calcul+proba_sain)
+}
+```
+
+## Bootstrap survival
+
+```{r}
+Bootstrap_surv <- function(B=100,n=6000,a=10,abis=10,tb=0){
+  est_survie <- data.frame(matrix(nrow = 17, ncol = B))
+  #est_survie=data.frame()
+  for(j in 1:B){
+    if(tb==0){df=selection(n)}
+    else{df=data}
+    
+    #Dementia model
+    Mdem=coxph(Surv(DELAIDEM,DEM0==1)~score14+SEXE+DIPNIVt+strata(Apoecentre)+AGE0t,data=df)
+    
+    #Death model without dementia
+    dfdem = df %>% mutate(AGEDCt=if_else(DEM0==0,AGEDC,AGEDEM),DELAIDCt=AGEDCt-AGE0,DCt=if_else(DEM0==0,DC,0))
+    Mdc=coxph(Surv(DELAIDCt,DCt==1)~score14+SEXE+DIPNIVt+APOE4+AGE0t+strata(CENTRE),data=dfdem)
+    
+    #Death model with dementia
+    Mdcdem=coxph(Surv(DELAIDEM,DELAIDC,DC==1)~score14+SEXE+DIPNIVt+APOE4+AGE0t+strata(CENTRE),data=df%>% filter(DEM0==1))
+    L=Ftable(Mdem,Mdc,Mdcdem,df,a,abis)
+    # for(t in 1:17){
+    #    est_survie[j,t]=Fsurvie(Mdem,Mdc,Mdcdem,L,t,a,abis)
+    #  }
+    est_survie[j] <- sapply(1:17, function(t){
+      Fsurvie(Mdem, Mdc, Mdcdem, L, t, a, abis)
+    })
+    print(j)
+  }
+  return(est_survie)
+}
+survie=Bootstrap_surv(5,6197,12,12)
+```
+
+## Bootstrap effect
+
+```{r}
+Bootstrap_effet <- function(B=10,n=6000,a=12,abis=4,tb=0){
+  est_part=data.frame()
+  for(j in 1:B){
+    if(tb==0){df=selection(n)}
+    else{df=data}
+    
+    #Dementia model
+    Mdem=coxph(Surv(DELAIDEM,DEM0==1)~score14+SEXE+DIPNIVt+strata(Apoecentre)+AGE0t,data=df)
+    
+    #Death model without dementia
+    dfdem = df %>% mutate(AGEDCt=if_else(DEM0==0,AGEDC,AGEDEM),DELAIDCt=AGEDCt-AGE0,DCt=if_else(DEM0==0,DC,0))
+    Mdc=coxph(Surv(DELAIDCt,DCt==1)~score14+SEXE+DIPNIVt+APOE4+AGE0t+strata(CENTRE),data=dfdem)
+    
+    #Detah model with dementia
+    Mdcdem=coxph(Surv(DELAIDEM,DELAIDC,DC==1)~score14+SEXE+DIPNIVt+APOE4+AGE0t+strata(CENTRE),data=df%>% filter(DEM0==1))
+    
+    L1=Ftable(Mdem,Mdc,Mdcdem,df,a,a)
+    L2=Ftable(Mdem,Mdc,Mdcdem,df,abis,abis)
+    L3=Ftable(Mdem,Mdc,Mdcdem,df,abis,a)
+    for(t in 1:17){
+      est_total=Fsurvie(Mdem,Mdc,Mdcdem,L1,t,a,a)-Fsurvie(Mdem,Mdc,Mdcdem,L2,t,abis,abis)
+      est_ind=Fsurvie(Mdem,Mdc,Mdcdem,L3,t,abis,a)-Fsurvie(Mdem,Mdc,Mdcdem,L2,t,abis,abis)
+      est_part[j,t]=(est_ind/est_total)*100
+    }
+  print(j)
+  }
+  return(est_part)
+}
+effet=Bootstrap_effet(10,6197,12,4)
+#quantile(survie,probs=c(0.025,0.975))
+```
+
+## Graph
+
+### Confidence interval calculation, survival probability
+
+```{r}
+survie=Bootstrap_surv(2,6197,12,12)
+survie_quartiles_sup <- apply(survie, 1, quantile, probs = c(0.025, 0.975))
+
+survie=Bootstrap_surv(2,6197,8,8)
+survie_quartiles_mid <- apply(survie, 1, quantile, probs = c(0.025, 0.975))
+
+survie=Bootstrap_surv(2,6197,4,4)
+survie_quartiles_inf <- apply(survie, 1, quantile, probs = c(0.025, 0.975))
+```
+
+### Confidence interval calculation, indirect effect
+
+```{r}
+effet=Bootstrap_effet(10,6197,12,4)
+effet_quartiles <- effet %>% summarise_all(quantile, probs = c(0.025, 0.975))
+```
+
+### Graph survival probability
+
+```{r}
+#Calculation with the real dataset
+Fi=data.frame()
+Fi=data.frame(seq(1:17))
+Fi$time=seq(1:17)
+cvibas=Bootstrap_surv(2,NA,4,4,1)%>%rename(cvibas=X1)
+Fi$cvibas=cvibas$cvibas
+cvimilieu=Bootstrap_surv(2,NA,8,8,1)%>%rename(cvimilieu=X1)
+Fi$cvimilieu=cvimilieu$cvimilieu
+cvihaut=Bootstrap_surv(2,NA,12,12,1)%>%rename(cvihaut=X1)
+Fi$cvihaut=cvihaut$cvihaut
+
+#We take each CI
+Fi$cviinfS=survie_quartiles_sup[1,]
+Fi$cvisupS=survie_quartiles_sup[2,]
+Fi$cviinfM=survie_quartiles_mid[1,]
+Fi$cvisupM=survie_quartiles_mid[2,]
+Fi$cviinfI=survie_quartiles_inf[1,]
+Fi$cvisupI=survie_quartiles_inf[2,]
+p <- ggplot(data = Fi, aes(x = time)) +
+  geom_line(aes(y = cvibas, color = "Low score")) +
+  geom_line(aes(y = cvimilieu, color = "Moderate score")) +
+  geom_line(aes(y = cvihaut, color = "High score")) +
+  scale_color_manual(values = rev(c("red", "orange", "green"))) +
+  geom_ribbon(data = Fi, aes(x = time, ymin = cviinfS, ymax = cvisupS, fill = "High score"), alpha = 0.3) +
+  geom_ribbon(data = Fi, aes(x = time, ymin = cviinfM, ymax = cvisupM, fill = "Moderate score"), alpha = 0.3) +
+  geom_ribbon(data = Fi, aes(x = time, ymin = cviinfI, ymax = cvisupI, fill = "Low score"), alpha = 0.3) +
+  ylab("Probability to be alive") +
+  xlab("Time (years)") +
+  theme_bw() +
+  theme()+
+  ylim(0, 1) 
+
+p + labs(color = "Scores", fill = "95% confidence interval")+ scale_fill_manual(values = c("Low score" = "lightcoral", "Moderate score" = "lightsalmon", "High score" = "lightgreen"))
+```
+
+### Graph indirect effect proportion
+
+```{r}
+Fi=data.frame(seq(1:17))
+Fi$time=seq(1:17)
+part=t(Bootstrap_effet(2,NA,12,4,1))
+colnames(part)=c("part","X2")
+Fi$part=part[,1]
+
+Fi$par_inf=t(effet_quartiles[1,])
+Fi$par_sup=t(effet_quartiles[2,])
+
+p <- ggplot(data = Fi, aes(x = time)) +
+  geom_line(aes(y = part)) +
+  geom_ribbon(aes(ymin = par_inf, ymax = par_sup, fill = "95% confidence interval"), alpha = 0.5) +
+  ylab("Proportion Indirect Effect (%)") +
+  xlab("Time (years)") +
+  theme_bw() +
+  ylim(-20, 110) +
+  xlim(3, 17) +
+  scale_fill_manual(values = "gray60", guide = guide_legend(title = "Legend"))
+p
+```

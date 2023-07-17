@@ -1,0 +1,394 @@
+---
+title: "Rendu modèles de survie"
+author: "Catherineau Alexandre"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+  html_document theme:paper: default
+  pdf_document: default
+---
+
+### Data loading
+
+```{r}
+data=read.table("datatransvers.txt",header=T)
+```
+
+### Loading the necessary packages
+
+```{r, message=FALSE, warning = FALSE}
+library(survminer, quietly = TRUE)
+library(survival)
+library(dplyr)
+library(cowplot)
+library(tidyr)
+```
+
+## Variable arrangement
+
+### Reduced centered age
+
+```{r}
+data$AGE0t=(data$AGE0-mean(data$AGE0))/sd(data$AGE0)
+```
+
+### Stratification apoe4 x Centre
+
+```{r}
+data$Apoecentre[data$APOE4==0&data$CENTRE==1]=1
+data$Apoecentre[data$APOE4==0&data$CENTRE==2]=2
+data$Apoecentre[data$APOE4==0&data$CENTRE==3]=3
+data$Apoecentre[data$APOE4==1&data$CENTRE==1]=4
+data$Apoecentre[data$APOE4==1&data$CENTRE==2]=5
+data$Apoecentre[data$APOE4==1&data$CENTRE==3]=6
+```
+
+------------------------------------------------------------------------
+
+## Calculation Cumulative risk
+
+Function :
+
+```{r}
+Rcumuldem <- function(M,score,sexe=1,dipniv=0,apoe4=0,age0=0,CENTRE=1){
+  #We take lambda0 
+  data0=data.frame("SEXE"=sexe,"DIPNIVt"=dipniv,"AGE0t"=age0,"score14"=score,"Apoecentre"=CENTRE)
+  
+  hazM=basehaz(M,newdata=data0)
+  
+  return(hazM)
+}
+```
+
+```{r}
+Rcumul <- function(M,score,sexe=1,dipniv=0,apoe4=0,age0=0,CENTRE=1){
+  #We take lambda0 
+  data0=data.frame("SEXE"=sexe,"DIPNIVt"=dipniv,"AGE0t"=age0,"score14"=score,"APOE4"=apoe4,"CENTRE"=CENTRE)
+  hazM=basehaz(M,newdata=data0)
+  
+  return(hazM)
+}
+```
+
+To calculate Lambda, we need to use this formula :
+
+$$
+𝚲^e(t)=𝛬_o^e(t)*exp( VAR_i*𝛽_i )
+$$
+
+------------------------------------------------------------------------
+
+## Dementia model *(Mdem)*
+
+### Model writing and rendering
+
+```{r}
+Mdem=coxph(Surv(DELAIDEM,DEM0==1)~score14+SEXE+DIPNIVt+strata(Apoecentre)+AGE0t,data=data)
+Mdem
+```
+
+### Model graph
+
+```{r}
+ggsurvplot(survfit(Mdem),data=data,risk.table=TRUE,cumevents=TRUE,
+          xlab="Time in years",
+          ylab="Probability to become demented",fun="event",
+          conf.int=T,
+          ylim=c(0,1),
+          xlim=c(0,16),
+          break.time.by=1,
+          censor=F)
+a=survfit(Mdem)
+```
+
+------------------------------------------------------------------------
+
+## Death model without dementia*(Mdc)*
+
+### Model preparation
+
+```{r}
+data = data %>% mutate(AGEDCt=if_else(DEM0==0,AGEDC,AGEDEM),DELAIDCt=AGEDCt-AGE0,DCt=if_else(DEM0==0,DC,0))
+```
+
+### Model writing and rendering
+
+```{r}
+Mdc=coxph(Surv(DELAIDCt,DCt==1)~score14+SEXE+DIPNIVt+APOE4+AGE0t+strata(CENTRE),data=data)
+Mdc
+```
+
+### Model graph
+
+```{r}
+ggsurvplot(survfit(Mdc),data=data,risk.table=TRUE,cumevents=TRUE,
+          xlab="Time in years",
+          ylab="Probability to become demented",fun="event",
+          conf.int=T,
+          ylim=c(0,1),
+          xlim=c(0,16),
+          break.time.by=1,
+          censor=F)
+```
+
+------------------------------------------------------------------------
+
+## Death model with dementia *(Mdcdemt) -\> semi-Markov*
+
+--\> not used during the internship
+
+### Model writing and rendering
+
+```{r}
+Mdcdemt=coxph(Surv(AGEDC-AGEDEM,DC==1)~score14+SEXE+DIPNIVt+APOE4+AGE0+strata(CENTRE),data=data %>% filter(DEM0==1))
+Mdcdemt
+```
+
+###Model graph
+
+```{r}
+ggsurvplot(survfit(Mdcdemt),data=data,risk.table=TRUE,cumevents=TRUE,
+          xlab="Time in years",
+          ylab="Probability to become demented",fun="event",
+          conf.int=T,
+          ylim=c(0,1),
+          xlim=c(0,16),
+          break.time.by=1,
+          censor=F)
+```
+
+## Death model with dementia *(Mdcdem)* -\> Markov
+
+### Model writing and rendering
+
+```{r}
+Mdcdem=coxph(Surv(DELAIDEM,DELAIDC,DC==1)~score14+SEXE+DIPNIVt+APOE4+AGE0t+strata(CENTRE),data=data%>% filter(DEM0==1))
+Mdcdem
+```
+
+### Model graph
+
+```{r}
+ggsurvplot(survfit(Mdcdem),data=data,risk.table=TRUE,cumevents=TRUE,
+          xlab="Time in years",
+          ylab="Probability to become demented",fun="event",
+          conf.int=T,
+          ylim=c(0,1),
+          xlim=c(0,16),
+          break.time.by=1,
+          censor=F)
+```
+
+------------------------------------------------------------------------
+
+## Probabilities
+
+### Function probability of being healthy
+
+```{r}
+Fsain <- function(t,L){
+  #We take the closest time
+  hazdc <- L %>% arrange(abs(time-t)) %>% filter(row_number()==1) %>% pull(hazdc)
+  
+  hazdem<- L %>% arrange(abs(time-t)) %>% filter(row_number()==1) %>% pull(hazdem)
+  
+  proba_sain = exp(-hazdem-hazdc)
+  return(proba_sain)
+}
+```
+
+### Function instantaneous risk
+
+```{r}
+Rinstant <- function(score){
+  #function instantaneous risk (alphaDEM)
+  L=Rcumuldem(Mdem,score)
+  L=L %>% select(time,hazard)
+  Lambda0=L
+  
+  #calculation
+  for(i in 1:length(L$hazard)-1){
+    Lambda0$hazard[i]=(L$hazard[i+1]-L$hazard[i])/(L$time[i+1]-L$time[i])
+  }
+  
+  return(Lambda0)
+}
+```
+
+### Table creation
+
+```{r}
+Ftable <- function(a,abis){
+#calculation of hazdem
+Ldem2=Rcumuldem(Mdem,abis)
+Ldem2=Ldem2 %>% rename(hazdem=hazard) %>% select(time,hazdem)
+
+#calculation of hazdc
+Ldc2=Rcumul(Mdc,a)
+Ldc2=Ldc2 %>% rename(hazdc=hazard) %>% select(time,hazdc)
+
+#calculation of hazdemdc
+Ldcdem2=Rcumul(Mdcdem,a)
+Ldcdem2=Ldcdem2 %>% rename(hazdcdem=hazard) %>% select(time,hazdcdem)
+
+#Base creation with all times
+#tdem, tdc, tdemdc
+L = (Ldem2 %>% select(time)) %>% bind_rows(Ldc2 %>% select(time)) %>% bind_rows(Ldcdem2 %>% select(time)) %>% unique()
+
+#Filling of hazdem
+Ldem = Ldem2 %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(hazdem,.direction='downup') %>% unique()
+
+#Filling of hazdc
+Ldc = Ldc2 %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(hazdc,.direction='downup')
+
+#Filling of hazdemdc(a)
+Ldcdem = Ldcdem2 %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(hazdcdem,.direction='downup')
+
+#Calcul du risque instantané alphadem
+Lalphadem=Rinstant(abis) 
+Lalphadem=Lalphadem %>% rename(alphadem=hazard)
+
+#Filling of alphadem
+Lalphadem = Lalphadem %>% full_join(L,by='time',relationship= "many-to-many") %>% arrange(time) %>% fill(alphadem,.direction='downup')
+
+#Regrouping of hazdem, hazdc, hazdemdc and alphadem
+L = (((Ldem %>% inner_join(Ldc,by='time',relationship= "many-to-many")) %>% inner_join(Ldcdem,by='time',relationship= "many-to-many")) %>%  inner_join(Lalphadem,by='time',relationship= "many-to-many"))
+
+return(L)
+}
+```
+
+### Survival function
+
+```{r}
+Fsurvie <- function(resultat=0,t=1,a=0,abis=0,sexe=1,dipniv=0,apoe4=0,age0=0){
+  L=Ftable(a,abis)
+  i=1
+  calcul=0
+  #We take the closest time
+  hazdcdem2 <- L %>% arrange(abs(time-t)) %>% filter(row_number()==1) %>% pull(hazdcdem)
+  
+  while(L$time[i]<t){
+    calcul = calcul+(exp(-L$hazdem[i]-L$hazdc[i])*L$alphadem[i]*exp(-hazdcdem2+L$hazdcdem[i]))*(min(t,L$time[i+1])-L$time[i])
+    i=i+1
+  }
+  proba_sain=Fsain(t,L)
+  if(resultat==0){
+    return(calcul+proba_sain)
+  }
+  if(resultat==1){
+    return(proba_sain)
+  }
+  if(resultat==2){
+    return(calcul)
+  }
+}
+Fsurvie(2,t=17,4,4)
+```
+
+### Graph survival probability
+
+```{r}
+Fi=data.frame(seq(1:17))
+Fi$time=seq(1:17)
+for(i in(1:17)){
+  Fi$cvibas[i]=Fsurvie(0,i,4,4)
+  Fi$cvimilieu[i]=Fsurvie(0,i,8,8)
+  Fi$cvihaut[i]=Fsurvie(0,i,12,12)
+}
+
+p=ggplot(data = Fi, aes(x=time))+
+  geom_line(aes(y=cvibas,color = "Low score"))+
+  geom_line(aes(y=cvimilieu,color = "Moderate score"))+
+  geom_line(aes(y=cvihaut,color = "High score"))+
+  scale_color_manual(values = c("green", "orange","red"))
+p + ylab("Survival probability") + xlab("Time (years)")+ theme_bw()+ylim(0,1)+ theme(legend.title = element_blank())
+```
+
+```{r}
+Fi=data.frame(seq(1:17))
+Fi$time=seq(1:17)
+for(i in(1:17)){
+  Fi$Sbas[i]=Fsurvie(1,i,4,4)
+  Fi$Smilieu[i]=Fsurvie(1,i,8,8)
+  Fi$Shaut[i]=Fsurvie(1,i,12,12)
+}
+for(i in(1:17)){
+  Fi$Dbas[i]=Fsurvie(2,i,4,4)
+  Fi$Dmilieu[i]=Fsurvie(2,i,8,8)
+  Fi$Dhaut[i]=Fsurvie(2,i,12,12)
+}
+
+p=ggplot(data = Fi, aes(x=time))+
+  geom_line(aes(y=Sbas,color = "Low score"))+
+  geom_line(aes(y=Smilieu,color = "Moderate score"))+
+  geom_line(aes(y=Shaut,color = "High score"))+
+  scale_color_manual(values = c("green", "red","orange"))
+p2=ggplot(data = Fi, aes(x=time))+
+  geom_line(aes(y=Dbas,color = "Low score"))+
+  geom_line(aes(y=Dmilieu,color = "Moderate score"))+
+  geom_line(aes(y=Dhaut,color = "High score"))+
+  scale_color_manual(values = c("green", "orange","red"))
+p + ylab("Probability to be alive without dementia") + xlab("Time (years)")+ theme_bw()+ylim(0,1)+ theme(legend.title = element_blank())
+
+p2 + ylab("Probabilité d'être vivant et dément") + xlab("Temps (années)")+ theme_bw()+ylim(0,1)+ theme(legend.title = element_blank())
+```
+
+### Calculating direct and indirect effects
+
+```{r}
+Fi=data.frame(seq(1:17))
+Fi$time=seq(1:17)
+for(i in(1:17)){
+  Fi$effetotal[i]=Fsurvie(0,i,12,12)-Fsurvie(0,i,4,4)
+  Fi$effetindirect[i]=Fsurvie(0,i,4,12)-Fsurvie(0,i,4,4)
+  #a=4 et abis=12 puis a=4 et abis=4
+  Fi$part[i]=(Fi$effetindirect[i]/Fi$effetotal[i])*100
+}
+#library(openxlsx)
+#write.xlsx(x = Fi, file = "data_ex_export.xlsx")
+```
+
+```{r}
+p=ggplot(data = Fi, aes(x=time))+
+  geom_line(aes(y=part))
+p + ylab("Proportion Indirect Effect (%)") + xlab("Time (years)")+ theme_bw()+ylim(0,100)+xlim(3,17) 
+```
+
+## Model adequacy
+
+### Proportionality of risks
+
+-\> Observations must be independent, and the risk rate must be constant over time. This means that the proportionality of risk from one observation to another must not vary over time.
+
+```{r}
+prop=cox.zph(Mdcdem,transform='identity')
+print(prop)
+```
+
+Here problems with Mdc and Mdem Mdem because of apoe4 and Mdc because of AGE0
+
+Hypothesis not validated as there is significant interaction with time
+
+global p_value less than 0.05 for Mdc and Mdem
+
+```{r}
+MdemT=coxph(Surv(DELAIDEM,DEM0==1)~score14+SEXE+DIPNIVt+strata(APOE4)+AGE0,data=data)
+MdemT
+prop=cox.zph(MdemT,transform='identity')
+print(prop)
+```
+
+By stratifying with apoe4 it seems that the problem has been solved.
+
+### Log-linearity
+
+The relative risk, for a one-unit increase in the variable, remains the same whatever the value of the explanatory variable.
+
+Spline model
+
+```{r}
+Mdem2=coxph(Surv(DELAIDCt,DCt==1)~pspline(score14)+AGE0+SEXE+DIPNIVt+APOE4,data=data)
+Mdem2
+```

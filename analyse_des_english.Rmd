@@ -1,0 +1,299 @@
+---
+title: "Stage | Analyse descriptive des données et modèle de survie "
+author: "Catherineau Alexandre"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Code R stage
+
+### Data and packages loading
+
+```{r}
+library(rlang)
+library(dplyr)
+data3C=read.table("base_Alexandre.txt",header=T)
+head(data3C)
+```
+
+### Looking data and variables
+
+```{r}
+summary(data3C)
+```
+
+We select the center for each person from NUM.
+
+```{r}
+data3C$CENTRE[data3C$NUM>=10000]=1
+data3C$CENTRE[data3C$NUM>=20000]=2
+data3C$CENTRE[data3C$NUM>=30000]=3
+```
+
+We discretize the DIPNIV variable to make it easier to use.
+
+```{r}
+data3C$DIPNIVt[data3C$DIPNIV==1|data3C$DIPNIV==2|data3C$DIPNIV==3]=0
+data3C$DIPNIVt[data3C$DIPNIV==4|data3C$DIPNIV==5]=1
+```
+
+We discretize the Apoe4 variable.
+
+```{r}
+data3C$score14t=cut(data3C$score14,c(0,6,8,10,14))
+```
+
+## Data manipulation to obtain the cross-sectional base
+
+Package to obtain variables summary
+
+```{r}
+library(skimr)
+data3C$DEM0=as.factor(data3C$DEM0)
+data3C$DIPNIVt=as.factor(data3C$DIPNIVt)
+data3C$DIPNIV=as.factor(data3C$DIPNIV)
+data3C$DC=as.factor(data3C$DC)
+data3C$SEXE=as.factor(data3C$SEXE)
+data3C$avccorr0=as.factor(data3C$avccorr0)
+data3C$malcorot=as.factor(data3C$malcorot)
+data3C$APOE4=as.factor(data3C$APOE4)
+data3C$CENTRE=as.factor(data3C$CENTRE)
+```
+
+The database *datatrans* is the transversal database at the first follow-up.
+
+```{r}
+excluSuivi=filter(data3C,SUIVI==8&abs(AGE0-AGEFIN)<0.0005)
+excluD=filter(data3C,SUIVI==0&DEM0==1)
+datatrans <- data3C %>% filter(SUIVI==0) %>% select(-DC,-DEM0,-SUIVI,-AGEFIN,-AGE,-AGEDEM)
+```
+
+We exclude all the people who don't have data for score14 variable. *#flow chart*
+
+```{r}
+data1 <- subset(datatrans, is.na(score14)==F)
+```
+
+We exclude all the people who don't have data for adjustment variables. *#flow chart*
+
+```{r}
+data2 <- subset(data1, is.na(DIPNIVt)==F & is.na(APOE4)==F & is.na(avccorr0)==F & is.na(malcorot)==F)
+```
+
+**Tables creation with incidents events.** (death, dementia, end)
+
+-   Final age
+
+```{r}
+longage = data3C %>% group_by(ID) %>% arrange(desc(AGEFIN)) %>% filter(row_number()==1) %>% select(ID,AGEFIN)
+```
+
+-   Death
+
+```{r}
+longdc = data3C %>% group_by(ID) %>% arrange(desc(AGEFIN)) %>% filter(row_number()==1) 
+
+#Here people not deceased -> age end censored
+longdc0 = longdc %>% group_by(ID) %>% filter(DC==0) %>% select(ID,DC,AGEFIN) %>% mutate(AGEFIN=max(AGEFIN))
+
+#Here people deceased -> age of death
+longdc1 = longdc %>% group_by(ID) %>% filter(DC==1) %>% select(ID,DC,AGEFIN)
+
+longdc = union(longdc1,longdc0)
+longdc = rename(longdc, AGEDC = AGEFIN)
+```
+
+-   Dementia
+
+```{r}
+#Here people without dementia -> last agedem as dementia age
+longdem0 = data3C %>% group_by(ID) %>% arrange(desc(AGEDEM))  %>% filter(row_number()==1) %>% filter(DEM0==0) %>% select(ID,DEM0,AGEDEM)
+
+#Here people with dementia -> dementia age
+longdem1=data3C %>% group_by(ID) %>% filter(DEM0==1) %>% filter(row_number()==1)  %>% select(ID,DEM0,AGEDEM)
+
+longdem=union(longdem1,longdem0)
+```
+
+Now we **merge** the three tables with ID.
+
+```{r}
+datatransvers=data2 %>% left_join(longdem,by="ID") %>% left_join(longdc,by="ID") %>% left_join(longage,by="ID")
+```
+
+Removal of lines where people have dementia or a history of cardiovascular disease at follow-up 0. *#flow chart*
+
+```{r}
+excluSuivi=(datatransvers %>% select(ID)) %>% intersect((excluSuivi %>% select(ID)))
+
+excludedDEM=subset(datatransvers, abs(AGE0-AGEDEM)<0.0005)
+
+excludedcardio=subset(datatransvers, avccorr0==1 | malcorot==1|malcorot==2)
+
+datatransvers <- subset(datatransvers, abs(AGE0-AGEDEM)>0.0005) 
+
+datatransvers <- subset(datatransvers,avccorr0==0 & malcorot==0)
+```
+
+Final data ---\> *datatransvers*
+
+**Flow chart**
+
+```{r}
+library(Gmisc)
+library(magrittr)
+library(glue)
+ 
+# The key boxes that we want to plot
+Pop <- boxGrob(glue("Population globale",
+            "n = {pop}",
+            pop = txtInt(length(datatrans$ID)),
+            .sep = "\n"))
+databox1 <- boxGrob(glue("Echantillon avec\nun score cardiovasculaire",
+            "n = {pop}",
+            pop = txtInt(length(data1$ID)),
+            .sep = "\n"))
+databox2 <- boxGrob(glue("Echantillon avec les\nvariables d'ajustement",
+            "n = {pop}",
+            pop = txtInt(length(data2$ID)),
+            .sep = "\n"))
+databox3 <- boxGrob(glue("Base finale",
+            "n = {pop}",
+            pop = txtInt(length(datatransvers$ID)),
+            .sep = "\n"))
+excluded1 <- boxGrob(glue("Scores\ncardiovasculaires\n manquants (n = {tot})",
+          tot=txtInt(length(datatrans$ID)-length(data1$ID)),
+            .sep = "\n",
+            just = "left"))
+excluded2 <- boxGrob(glue("Variables d'ajustement\nmanquantes (n = {tot}) :",
+            "- Niveau d'étude (n={DIPNIV})",
+            "- APOE4 (n={APOE4})",
+            "- Antécédents cardiovasculaires (n={ant})",
+            DIPNIV = sum(is.na(data1$DIPNIVt)),
+            APOE4 = sum(is.na(data1$APOE4)),
+            ant = length(data1$ID)-length(data2$ID)-DIPNIV-APOE4,
+            tot=txtInt(length(data1$ID)-length(data2$ID)),
+            .sep = "\n",
+            just = "left"))
+excluded3 <- boxGrob(glue("Au suivi 0, personnes :",
+            "- démentes (n={DEM})",
+            "- présentant des antécédents\ncardiovasculaires (n={avc_mal})",
+            DEM = length(excludedDEM$ID),
+            avc_mal = length(data2$ID)-length(datatransvers$ID)-length(excludedDEM$ID),
+            .sep = "\n",
+            just = "left"))
+ 
+# Move boxes to where we want them
+vert <- spreadVertical(Pop=Pop,
+                       databox1 = databox1,
+                       databox2 = databox2,
+                       databox3 = databox3)
+ 
+y1 <- coords(vert$databox1)$top +
+  distance(vert$Pop, vert$databox1, half = TRUE, center = FALSE)
+y2 <- coords(vert$databox2)$top +
+  distance(vert$databox1, vert$databox2, half = TRUE, center = FALSE)
+y3 <- coords(vert$databox3)$top +
+  distance(vert$databox2, vert$databox3, half = TRUE, center = FALSE)
+
+excluded1 <- moveBox(excluded1,
+                    x = .8,
+                    y = y1)
+excluded2 <- moveBox(excluded2,
+                    x = .8,
+                    y = y2)
+excluded3 <- moveBox(excluded3,
+                    x = .8,
+                    y = y3)
+
+# Connect vertical arrows, skip last box
+for (i in 1:(length(vert) - 1)) {
+  connectGrob(vert[[i]], vert[[i + 1]], type = "vert") %>%
+    print
+}
+ 
+# Add a connection to the exclusions
+connectGrob(vert$databox1, excluded2, type = "L")
+connectGrob(vert$Pop, excluded1, type = "L")
+connectGrob(vert$databox2, excluded3, type = "L")
+
+# Print boxes
+vert
+excluded1
+excluded2
+excluded3
+```
+
+Calculation of low and upper for the 4 cases.
+
+We take data3C but only with people already included.
+
+```{r}
+df=semi_join(data3C,datatransvers, by = "ID")
+```
+
+Demented
+
+```{r}
+#Lower age
+low = df %>% group_by(ID) %>% arrange(desc(AGE)) %>% filter(DEM0==0) %>% filter(row_number()==1) %>% select(AGE,ID) %>% rename(AGEDEMlow=AGE)
+
+#Upper age
+upper=df %>% group_by(ID)%>% arrange(AGE) %>% filter(DEM0==1) %>% filter(row_number()==1) %>%select(AGE,ID) %>% rename(AGEDEMup=AGE)
+
+D=inner_join(low,upper,by="ID")
+```
+
+Non demented non deceased
+
+```{r}
+#Lower age 
+low = datatransvers %>% filter(DEM0==0&DC==0) %>% select(ID,AGEDEM) %>% rename(AGEDEMlow=AGEDEM)
+
+#Upper age 
+upper = datatransvers %>% filter(DEM0==0&DC==0) %>% select(ID,AGEDEM) %>% rename(AGEDEMup=AGEDEM)
+
+nDnD=inner_join(low,upper,by="ID")
+```
+
+non Déments décédés
+
+```{r}
+#Lower age
+low = datatransvers %>% filter(DEM0==0&DC==1) %>% select(ID,AGEDEM) %>% rename(AGEDEMlow=AGEDEM)
+
+#Upper age
+upper = datatransvers %>% filter(DEM0==0&DC==1) %>% select(ID,AGEDC) %>% rename(AGEDEMup=AGEDC)
+
+nDD=inner_join(low,upper,by="ID")
+```
+
+```{r}
+df=union(D,union(nDD,nDnD))
+datatransvers= datatransvers %>% left_join(df,by="ID")
+```
+
+```{r}
+df=data3C %>% group_by(ID) %>% semi_join(excludedDEM,by="ID")
+```
+
+Here this patient has his dementia age increasing after being diagnosed as demented. We assume that his age was not meant to be increased.
+
+```{r}
+datatransvers$AGEDEMup[3251]=(data3C%>%filter(ID==4954&SUIVI==5))$AGEDEM
+```
+
+## Survival methods
+
+Delays calculation
+
+```{r}
+datatransvers$DELAIDEM=datatransvers$AGEDEM-datatransvers$AGE0
+datatransvers$DELAIDC=datatransvers$AGEDC-datatransvers$AGE0
+```
+
+Database writing
+
+```{r}
+write.table(datatransvers,file="datatransvers.txt", fileEncoding = "UTF-8")
+```
